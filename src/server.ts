@@ -37,7 +37,7 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
   if (config.proxyApiKeys.length > 0) {
     app.addHook('onRequest', (req, reply, done) => {
       const url = req.url
-      if (url === '/health' || url.startsWith('/v1/models') || url.startsWith('/v1/usage')) {
+      if (url === '/' || url === '/health' || url.startsWith('/v1/models') || url.startsWith('/v1/usage')) {
         return done()
       }
       const auth = req.headers.authorization
@@ -99,6 +99,7 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
   registerModels(app, forwarder, lb)
   registerUsage(app, tracker)
 
+  app.get('/', async () => ({ status: 'ok' }))
   app.get('/health', async () => ({ status: 'ok' }))
 
   app.setErrorHandler((err: Error & { statusCode?: number }, _req, reply) => {
