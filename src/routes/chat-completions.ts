@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { RetryHandler } from '../retry-handler.js'
 import type { UsageTracker } from '../usage-tracker.js'
 import { pipeStream } from '../proxy/stream-handler.js'
+import { normalizeUpstreamError } from '../proxy/error-normalizer.js'
 
 export function registerChatCompletions(
   app: FastifyInstance,
@@ -24,17 +25,16 @@ export function registerChatCompletions(
         tracker.pushProxyUsage(proxyKeyIndex, prompt, completion)
       }
 
+      const upstreamStatus = result.statusCode
+
       if (!isStreaming) {
         let data = ''
         for await (const chunk of result.body as NodeJS.ReadableStream) {
           data += typeof chunk === 'string' ? chunk : chunk.toString()
         }
 
-        const upstreamStatus = result.statusCode
         if (upstreamStatus >= 400) {
-          let errorBody: Record<string, unknown> = {}
-          try { errorBody = JSON.parse(data) } catch { /**/ }
-          return reply.code(upstreamStatus).send(errorBody)
+          return reply.code(upstreamStatus).send(normalizeUpstreamError(upstreamStatus, data))
         }
 
         try {
@@ -44,14 +44,16 @@ export function registerChatCompletions(
           }
           return reply.code(200).send(parsed)
         } catch {
-          return reply.code(502).send({
-            error: {
-              message: 'Invalid JSON response from upstream',
-              type: 'proxy_error',
-              code: 'upstream_invalid_response',
-            },
-          })
+          return reply.code(502).send(normalizeUpstreamError(502, data))
         }
+      }
+
+      if (upstreamStatus >= 400) {
+        let data = ''
+        for await (const chunk of result.body as NodeJS.ReadableStream) {
+          data += typeof chunk === 'string' ? chunk : chunk.toString()
+        }
+        return reply.code(upstreamStatus).send(normalizeUpstreamError(upstreamStatus, data))
       }
 
       await pipeStream(result.body as NodeJS.ReadableStream, reply, async (usage) => {

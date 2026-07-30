@@ -1,6 +1,8 @@
 import type { LoadBalancer } from './load-balancer.js'
 import type { Forwarder, ForwardResult } from './proxy/forwarder.js'
 
+const WEEK_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000
+
 export interface ForwardResultWithKey extends ForwardResult {
   keyIndex: number
 }
@@ -11,6 +13,24 @@ export class KeyLimitError extends Error {
     super('All API keys have exceeded their token limits')
     this.name = 'KeyLimitError'
   }
+}
+
+function isWeeklyLimitError(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body)
+    const msg = typeof parsed?.error === 'string' ? parsed.error : ''
+    return msg.includes('weekly usage limit')
+  } catch {
+    return false
+  }
+}
+
+async function readBodyStream(stream: NodeJS.ReadableStream): Promise<string> {
+  let data = ''
+  for await (const chunk of stream) {
+    data += typeof chunk === 'string' ? chunk : chunk.toString()
+  }
+  return data
 }
 
 export function createRetryHandler(
@@ -26,6 +46,7 @@ export function createRetryHandler(
     body: unknown,
   ): Promise<ForwardResultWithKey> {
     let lastError: Error | null = null
+    let lastStatusCode = 502
 
     const isAvailable = isKeyOverLimit
       ? async (idx: number) => {
@@ -45,16 +66,37 @@ export function createRetryHandler(
       try {
         const result = await forwarder.forwardToOllama(path, body, picked.key)
 
-        if (result.statusCode < 500) {
+        const sc = result.statusCode
+
+        if (sc < 400) {
           return { ...result, keyIndex: picked.index }
         }
 
-        lastError = new Error(
-          `Ollama returned ${result.statusCode} for key ${maskKey(picked.key)}`,
-        )
-        lb.markKeyFailed(picked.index)
-        const reader = result.body as NodeJS.ReadableStream
-        reader.resume()
+        if (sc === 429) {
+          const errorBody = await readBodyStream(result.body)
+          const cooldown = isWeeklyLimitError(errorBody) ? WEEK_COOLDOWN_MS : undefined
+          lb.markKeyFailed(picked.index, cooldown)
+          lastStatusCode = sc
+          lastError = new Error(
+            isWeeklyLimitError(errorBody)
+              ? 'Key hit weekly usage limit'
+              : `Ollama returned 429 for key ${maskKey(picked.key)}`,
+          )
+          continue
+        }
+
+        if (sc >= 500) {
+          lastError = new Error(
+            `Ollama returned ${sc} for key ${maskKey(picked.key)}`,
+          )
+          lastStatusCode = sc
+          lb.markKeyFailed(picked.index)
+          const reader = result.body as NodeJS.ReadableStream
+          reader.resume()
+          continue
+        }
+
+        return { ...result, keyIndex: picked.index }
 
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err))
@@ -62,9 +104,9 @@ export function createRetryHandler(
       }
     }
 
-    throw new Error(
-      `All ${maxAttempts} attempts failed. Last error: ${lastError!.message}`,
-    )
+    const err = lastError ?? new Error('All retry attempts failed')
+    ;(err as any).statusCode = lastStatusCode
+    throw err
   }
 
   return { forwardWithRetry }

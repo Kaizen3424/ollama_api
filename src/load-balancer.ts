@@ -5,8 +5,8 @@ export function createLoadBalancer(
   keys: string[],
   cooldownMs: number,
 ) {
-  function markKeyFailed(idx: number): void {
-    cooldowns.set(idx, Date.now() + cooldownMs)
+  function markKeyFailed(idx: number, customCooldownMs?: number): void {
+    cooldowns.set(idx, Date.now() + (customCooldownMs ?? cooldownMs))
   }
 
   async function getNextKey(
