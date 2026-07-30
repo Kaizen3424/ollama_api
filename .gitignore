@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.env
+ollama_keys.txt
+*.log
