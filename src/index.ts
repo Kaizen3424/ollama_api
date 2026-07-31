@@ -1,15 +1,22 @@
+import type { Server } from 'node:http'
 import { loadConfig } from './config.js'
 import { buildServer } from './server.js'
 
 const config = loadConfig()
 const prettyLogs = process.env.NODE_ENV !== 'production'
 
-const { app, tracker } = await buildServer(config, prettyLogs)
+const { app, tracker, logger } = await buildServer(config, prettyLogs)
+
+let server: Server
 
 const start = async () => {
   try {
-    await app.listen({ port: config.port, host: config.host })
-    app.log.info(`Listening on http://${config.host}:${config.port}`)
+    server = app.listen(config.port, config.host, () => {
+      logger.info(`Listening on http://${config.host}:${config.port}`)
+    })
+    server.keepAliveTimeout = 120_000
+    server.headersTimeout = 125_000
+    server.requestTimeout = 0
   } catch (err) {
     console.error('Failed to start server:', err)
     process.exit(1)
@@ -17,9 +24,11 @@ const start = async () => {
 }
 
 const shutdown = async () => {
-  app.log.info('Shutting down...')
+  logger.info('Shutting down...')
   if (tracker) await tracker.stopFlush()
-  await app.close()
+  if (server) {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
   process.exit(0)
 }
 

@@ -1,4 +1,4 @@
-import type { FastifyReply } from 'fastify'
+import type { ServerResponse } from 'node:http'
 
 export interface StreamUsage {
   prompt_tokens: number
@@ -6,41 +6,96 @@ export interface StreamUsage {
   total_tokens: number
 }
 
+export interface SseLineSplitter {
+  push(chunk: string): string[]
+  flush(): string | undefined
+}
+
+export function createSseLineSplitter(): SseLineSplitter {
+  let buffer = ''
+  return {
+    push(chunk: string): string[] {
+      buffer += chunk
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      return lines.map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line))
+    },
+    flush(): string | undefined {
+      const leftover = buffer
+      buffer = ''
+      return leftover === '' ? undefined : leftover
+    },
+  }
+}
+
+export interface PipeStreamOptions {
+  signal?: AbortSignal
+  onUsage?: (usage: StreamUsage) => void | Promise<void>
+}
+
 export async function pipeStream(
   upstreamBody: NodeJS.ReadableStream,
-  reply: FastifyReply,
-  onUsage?: (usage: StreamUsage) => void | Promise<void>,
+  res: ServerResponse,
+  options: PipeStreamOptions = {},
 ): Promise<void> {
-  const rawRes = reply.raw
-  rawRes.writeHead(200, {
-    'Content-Type': 'text/event-stream',
+  const { signal, onUsage } = options
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
   })
 
-  for await (const chunk of upstreamBody) {
-    const str = typeof chunk === 'string' ? chunk : chunk.toString()
+  const splitter = createSseLineSplitter()
 
-    if (str.startsWith('data: ') || str.startsWith('data:')) {
-      rawRes.write(str)
-      rawRes.write('\n\n')
-
-      if (onUsage) {
-        const jsonStr = str.replace(/^data:\s*/, '')
-        try {
-          const parsed = JSON.parse(jsonStr)
-          if (parsed.usage) {
-            await onUsage(parsed.usage)
-          }
-        } catch { /* not JSON, skip */ }
-      }
-    } else if (str.trim() === '[DONE]') {
-      rawRes.write('data: [DONE]\n\n')
-    } else if (str.trim().length > 0) {
-      rawRes.write(`data: ${str}\n\n`)
-    }
+  const emitLine = (line: string): boolean => {
+    if (res.destroyed || res.writableEnded) return false
+    res.write(line)
+    res.write('\n')
+    return true
   }
 
-  rawRes.end()
+  const emitErrorEvent = (message: string) => {
+    const payload = JSON.stringify({
+      error: { message, type: 'proxy_error', code: '502' },
+    })
+    res.write(`data: ${payload}\n\n`)
+    res.write('data: [DONE]\n\n')
+  }
+
+  try {
+    for await (const chunk of upstreamBody) {
+      if (res.destroyed || res.writableEnded || signal?.aborted) break
+      const str = typeof chunk === 'string' ? chunk : chunk.toString()
+
+      for (const line of splitter.push(str)) {
+        if (!emitLine(line)) break
+
+        if (onUsage && line.startsWith('data:')) {
+          const jsonStr = line.slice(5).trim()
+          if (jsonStr && jsonStr !== '[DONE]') {
+            try {
+              const parsed = JSON.parse(jsonStr)
+              if (parsed?.usage) {
+                await onUsage(parsed.usage)
+              }
+            } catch { /* not JSON — skip */ }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    // upstream stream aborted (client disconnect or upstream failure mid-stream)
+    const message = err instanceof Error ? err.message : String(err)
+    const clientGone = res.destroyed || res.writableEnded || signal?.aborted
+    if (!clientGone) {
+      emitErrorEvent(message)
+    }
+  } finally {
+    splitter.flush()
+    if (!res.destroyed && !res.writableEnded) {
+      res.end()
+    }
+  }
 }

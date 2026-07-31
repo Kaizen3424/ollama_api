@@ -1,14 +1,48 @@
-import Fastify from 'fastify'
-import cors from '@fastify/cors'
+import express from 'express'
+import cors from 'cors'
+import pino from 'pino'
 import type { AppConfig } from './types/config.js'
 import { createLoadBalancer } from './load-balancer.js'
 import { createForwarder } from './proxy/forwarder.js'
 import { createRetryHandler } from './retry-handler.js'
 import { connectMongo, createUsageTracker, type UsageTracker } from './usage-tracker.js'
 import { registerChatCompletions } from './routes/chat-completions.js'
+import { registerCompletions } from './routes/completions.js'
+import { registerEmbeddings } from './routes/embeddings.js'
 import { registerModels } from './routes/models.js'
 import { registerUsage } from './routes/usage.js'
 import type { ApiError } from './types/openai.js'
+
+function requestLogger(logger: pino.Logger) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const start = process.hrtime.bigint()
+    let logged = false
+
+    const log = (aborted: boolean) => {
+      if (logged) return
+      logged = true
+
+      const elapsedNs = process.hrtime.bigint() - start
+      const durationSec = Number(elapsedNs) / 1e9
+      const status = res.statusCode || 0
+      const path = req.path || req.url
+      const reason = (res.locals as { _errMessage?: string })?._errMessage
+      const suffix = aborted ? ' (client aborted)' : ''
+      const tail = reason ? ` — ${reason}` : ''
+
+      const line = `${req.method} ${path} -> ${status} in ${durationSec.toFixed(2)}s${tail}${suffix}`
+
+      if (status >= 500) logger.error(line)
+      else if (status >= 400) logger.warn(line)
+      else logger.info(line)
+    }
+
+    res.on('finish', () => log(false))
+    res.on('close', () => log(true))
+
+    next()
+  }
+}
 
 export async function buildServer(config: AppConfig, prettyLogs = false) {
   const loggerConfig = prettyLogs
@@ -18,58 +52,52 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
       }
     : { level: process.env.LOG_LEVEL ?? 'info' }
 
-  const app = Fastify({ logger: loggerConfig, bodyLimit: 50 * 1024 * 1024 })
+  const logger = pino(loggerConfig)
+  const app = express()
 
-  app.register(cors, { origin: true })
+  app.use(express.json({ limit: '50mb' }))
+  app.use(cors({ origin: true }))
 
-  app.addContentTypeParser(
-    'application/json',
-    { parseAs: 'string', bodyLimit: 50 * 1024 * 1024 },
-    (_req, body: string, done) => {
-      try {
-        done(null, JSON.parse(body))
-      } catch (err) {
-        done(err as Error, undefined)
-      }
-    },
-  )
+  app.use(requestLogger(logger))
 
   if (config.proxyApiKeys.length > 0) {
-    app.addHook('onRequest', (req, reply, done) => {
+    app.use((req, res, next) => {
       const url = req.url
-      if (url === '/' || url === '/health' || url.startsWith('/v1/models') || url.startsWith('/v1/usage')) {
-        return done()
+      if (url === '/health' || url.startsWith('/v1/models') || url.startsWith('/v1/usage')) {
+        return next()
       }
       const auth = req.headers.authorization
       if (!auth || !auth.startsWith('Bearer ')) {
-        return reply.code(401).send({
+        res.locals._errMessage = 'Invalid or missing API key'
+        return res.status(401).json({
           error: { message: 'Invalid or missing API key', type: 'auth_error', code: '401' },
         })
       }
       const token = auth.slice(7)
       const idx = config.proxyApiKeys.indexOf(token)
       if (idx === -1) {
-        return reply.code(401).send({
+        res.locals._errMessage = 'Invalid or missing API key'
+        return res.status(401).json({
           error: { message: 'Invalid or missing API key', type: 'auth_error', code: '401' },
         })
       }
       ;(req as any).proxyKeyIndex = idx
-      done()
+      next()
     })
   }
 
   const lb = createLoadBalancer(config.keys, config.keyCooldownMs)
   const forwarder = createForwarder(config.upstreamBase)
 
-  app.log.info(`Loaded ${config.keys.length} API keys`)
+  logger.info(`Loaded ${config.keys.length} API keys`)
 
   let tracker: UsageTracker | undefined
   try {
     const db = await connectMongo(config.mongodbUri, config.mongodbDatabase)
     tracker = createUsageTracker(db, config.usageFlushMs)
-    app.log.info('Connected to MongoDB')
+    logger.info('Connected to MongoDB')
   } catch (err) {
-    app.log.warn({ err }, 'MongoDB unavailable — usage tracking disabled')
+    logger.warn({ err }, 'MongoDB unavailable — usage tracking disabled')
   }
 
   const retry = createRetryHandler(
@@ -79,31 +107,19 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
     config.keyTokenLimitWeek,
   )
 
-  app.addHook('onRequest', (req, _reply, done) => {
-    req.startTime = Date.now()
-    done()
-  })
-
-  app.addHook('onResponse', (req, reply, done) => {
-    const ms = Date.now() - (req.startTime ?? Date.now())
-    const status = reply.statusCode
-    const method = req.method.padEnd(6)
-    const url = req.url
-    const coloredStatus = status >= 400 ? `\x1b[31m${status}\x1b[0m` : `\x1b[32m${status}\x1b[0m`
-    const coloredMs = ms >= 1000 ? `\x1b[33m${ms}ms\x1b[0m` : `${ms}ms`
-    app.log.info(`${method} ${url} → ${coloredStatus} (${coloredMs})`)
-    done()
-  })
-
   registerChatCompletions(app, retry, tracker)
-  registerModels(app, forwarder, lb)
+  registerCompletions(app, retry, tracker)
+  registerEmbeddings(app, retry, tracker)
+  registerModels(app, forwarder, lb, logger)
   registerUsage(app, tracker)
 
-  app.get('/', async () => ({ status: 'ok' }))
-  app.get('/health', async () => ({ status: 'ok' }))
+  app.get('/health', (_req, res) => {
+    res.json({ status: 'ok' })
+  })
 
-  app.setErrorHandler((err: Error & { statusCode?: number }, _req, reply) => {
+  app.use((err: Error & { statusCode?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     const statusCode = err.statusCode ?? 500
+    res.locals._errMessage = err.message ?? 'Internal server error'
     const errorBody: ApiError = {
       error: {
         message: err.message ?? 'Internal server error',
@@ -111,15 +127,8 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
         code: String(statusCode),
       },
     }
-    return reply.code(statusCode).send(errorBody)
+    res.status(statusCode).json(errorBody)
   })
 
-  return { app, lb, retry, tracker }
-}
-
-declare module 'fastify' {
-  interface FastifyRequest {
-    startTime?: number
-    proxyKeyIndex?: number
-  }
+  return { app, lb, retry, tracker, logger }
 }

@@ -44,6 +44,7 @@ export function createRetryHandler(
   async function forwardWithRetry(
     path: string,
     body: unknown,
+    signal?: AbortSignal,
   ): Promise<ForwardResultWithKey> {
     let lastError: Error | null = null
     let lastStatusCode = 502
@@ -57,6 +58,8 @@ export function createRetryHandler(
       : undefined
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (signal?.aborted) throw createAbortError()
+
       const picked = await lb.getNextKey(isAvailable)
       if (!picked) {
         if (isKeyOverLimit) throw new KeyLimitError()
@@ -64,7 +67,7 @@ export function createRetryHandler(
       }
 
       try {
-        const result = await forwarder.forwardToOllama(path, body, picked.key)
+        const result = await forwarder.forwardToOllama(path, body, picked.key, signal)
 
         const sc = result.statusCode
 
@@ -99,6 +102,9 @@ export function createRetryHandler(
         return { ...result, keyIndex: picked.index }
 
       } catch (err) {
+        if (signal?.aborted) {
+          throw createAbortError()
+        }
         lastError = err instanceof Error ? err : new Error(String(err))
         lb.markKeyFailed(picked.index)
       }
@@ -113,6 +119,13 @@ export function createRetryHandler(
 }
 
 export type RetryHandler = ReturnType<typeof createRetryHandler>
+
+function createAbortError(): Error {
+  const err = new Error('Request aborted by client')
+  err.name = 'AbortError'
+  ;(err as any).statusCode = 499
+  return err
+}
 
 function maskKey(key: string): string {
   if (key.length <= 8) return '****'

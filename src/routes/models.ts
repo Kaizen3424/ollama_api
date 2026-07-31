@@ -1,4 +1,5 @@
-import type { FastifyInstance } from 'fastify'
+import type { Express, Request, Response } from 'express'
+import type pino from 'pino'
 import type { ModelInfo, ModelListResponse } from '../types/openai.js'
 import type { Forwarder } from '../proxy/forwarder.js'
 import type { LoadBalancer } from '../load-balancer.js'
@@ -25,32 +26,44 @@ async function fetchModels(forwarder: Forwarder, key: string): Promise<ModelInfo
   }))
 }
 
-export function registerModels(app: FastifyInstance, forwarder: Forwarder, lb: LoadBalancer) {
-  app.get('/v1/models', async (_req, reply) => {
-    const now = Date.now()
-    if (cachedModels && now - cacheTime < CACHE_TTL) {
-      return reply.code(200).send({ object: 'list', data: cachedModels })
-    }
+export function registerModels(app: Express, forwarder: Forwarder, lb: LoadBalancer, logger: pino.Logger) {
+  app.get('/v1/models', async (req: Request, res: Response) => {
+    try {
+      const now = Date.now()
+      if (cachedModels && now - cacheTime < CACHE_TTL) {
+        return res.status(200).json({ object: 'list', data: cachedModels })
+      }
 
-    const key = lb.getKeyAt(0)
-    if (key) {
-      try {
-        cachedModels = await fetchModels(forwarder, key)
-        cacheTime = now
-        return reply.code(200).send({ object: 'list', data: cachedModels })
-      } catch (err) {
-        _req.log.warn({ err }, 'Failed to fetch models from upstream, using cache')
+      const key = lb.getKeyAt(0)
+      if (key) {
+        try {
+          cachedModels = await fetchModels(forwarder, key)
+          cacheTime = now
+          return res.status(200).json({ object: 'list', data: cachedModels })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          res.locals._errMessage = message
+          logger.warn({ err }, `Failed to fetch models from upstream: ${message}`)
+          if (cachedModels) {
+            return res.status(200).json({ object: 'list', data: cachedModels })
+          }
+        }
+      } else {
+        res.locals._errMessage = 'No API keys available'
+        logger.warn('No API keys available for model fetch, using cache')
         if (cachedModels) {
-          return reply.code(200).send({ object: 'list', data: cachedModels })
+          return res.status(200).json({ object: 'list', data: cachedModels })
         }
       }
-    } else {
-      _req.log.warn('No API keys available for model fetch, using cache')
-      if (cachedModels) {
-        return reply.code(200).send({ object: 'list', data: cachedModels })
-      }
-    }
 
-    return reply.code(200).send({ object: 'list', data: [] })
+      return res.status(200).json({ object: 'list', data: [] })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      res.locals._errMessage = message
+      logger.error({ err }, `Models handler error: ${message}`)
+      return res.status(500).json({
+        error: { message: 'Internal server error', type: 'internal_error', code: '500' },
+      })
+    }
   })
 }

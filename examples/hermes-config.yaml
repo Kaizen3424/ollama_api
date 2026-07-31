@@ -1,0 +1,27 @@
+# Hermes Agent config.yaml — point Hermes at the Ollama proxy as a custom endpoint.
+# Place in ~/.hermes/config.yaml (merge with your existing config).
+#
+# Run `hermes model` -> "Custom endpoint" and enter:
+#   API base URL: http://localhost:3001/v1
+#   API key:      <one of your PROXY_API_KEY* values>
+#   Model name:   minimax-m3 (or any id from GET /v1/models)
+
+model:
+  default: minimax-m3
+  provider: custom
+  base_url: http://localhost:3001/v1
+  api_key: sk-replace-with-proxy-api-key
+  # Hermes requires at least 64,000 tokens of context for agent use with tools.
+  # Ollama cloud does not report context length via /v1/models, so set it here
+  # (leave unset to fall back to models.dev / defaults).
+  context_length: 128000
+
+# Optional: named custom provider (multiple proxy endpoints, `/model custom:name:model`)
+providers:
+  ollama-proxy:
+    api: http://localhost:3001/v1
+    key_env: OLLAMA_PROXY_API_KEY
+    transport: chat_completions
+    default_model: minimax-m3
+    context_length: 128000
+    discover_models: true

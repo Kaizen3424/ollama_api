@@ -4,9 +4,15 @@ export interface ForwardResult {
   statusCode: number
   headers: Record<string, string | string[] | undefined>
   body: NodeJS.ReadableStream
+  requestId?: string
 }
 
 const REQUEST_TIMEOUT_MS = 120_000
+
+function extractRequestId(headers: ForwardResult['headers']): string | undefined {
+  const id = headers['x-request-id']
+  return Array.isArray(id) ? id[0] : id
+}
 
 export function createForwarder(upstreamBase: string) {
   function buildUrl(path: string): string {
@@ -17,6 +23,7 @@ export function createForwarder(upstreamBase: string) {
     path: string,
     body: unknown,
     apiKey: string,
+    signal?: AbortSignal,
   ): Promise<ForwardResult> {
     const isStreaming = (body as Record<string, unknown>)?.stream === true
 
@@ -29,13 +36,15 @@ export function createForwarder(upstreamBase: string) {
       },
       body: JSON.stringify(body),
       headersTimeout: REQUEST_TIMEOUT_MS,
-      bodyTimeout: REQUEST_TIMEOUT_MS,
+      bodyTimeout: isStreaming ? 0 : REQUEST_TIMEOUT_MS,
+      signal,
     })
 
     return {
       statusCode: res.statusCode,
       headers: res.headers,
       body: res.body,
+      requestId: extractRequestId(res.headers),
     }
   }
 

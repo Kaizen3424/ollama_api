@@ -1,10 +1,10 @@
-import type { FastifyInstance } from 'fastify'
+import type { Express, Request, Response } from 'express'
 import type { UsageTracker } from '../usage-tracker.js'
 
-export function registerUsage(app: FastifyInstance, tracker?: UsageTracker) {
-  app.get('/v1/usage', async (_req, reply) => {
+export function registerUsage(app: Express, tracker?: UsageTracker) {
+  app.get('/v1/usage', async (req: Request, res: Response) => {
     if (!tracker) {
-      return reply.code(503).send({
+      return res.status(503).json({
         error: {
           message: 'Usage tracking is not available (MongoDB not connected)',
           type: 'service_unavailable',
@@ -23,7 +23,7 @@ export function registerUsage(app: FastifyInstance, tracker?: UsageTracker) {
       { total_prompt_tokens: 0, total_completion_tokens: 0, total_tokens: 0 },
     )
 
-    return reply.code(200).send({
+    return res.status(200).json({
       object: 'list',
       total,
       proxy_keys: docs.map(d => ({

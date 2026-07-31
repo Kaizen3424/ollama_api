@@ -1,41 +1,32 @@
-# Task List: Fix Issues & Dynamic Model List
+# Task List: Agent Compatibility Hardening
 
-## Phase 1: Foundation Fixes
+## Phase 1: Connection hardening — DONE
 
-- [ ] **Task 1**: Fix silent data loss on MongoDB flush failure
-  - Priority: High | Scope: XS (1 file) | Deps: None
-- [ ] **Task 2**: Fix missing await on trackUsage in streaming path
-  - Priority: High | Scope: XS (2 files) | Deps: None
+- [x] **Task 1: Client-disconnect abort** (forwarder, retry-handler, chat route, stream-handler)
+  - Abort verified: "Client disconnected, aborting upstream request" logged on client cancel
+- [x] **Task 2: Server timeouts + x-request-id**
+  - keepAlive 120s / headers 125s / requestTimeout disabled; x-request-id forwarded (verified in logs + tests)
 
-### Checkpoint: Phase 1
-- [ ] Build succeeds
+## Phase 2: New endpoints — DONE
 
-## Phase 2: Token Limit Enforcement
+- [x] **Task 3: Generic passthrough route factory** (`src/routes/passthrough.ts`)
+  - Fixed `/v1/v1/` double-prefix bug via `upstreamPath` option
+- [x] **Task 4: /v1/completions + /v1/embeddings**
+  - completions: 400 invalid_request_error forwarded verbatim; embeddings: normalized 404; both 401 without key
 
-- [ ] **Task 3**: Make getNextKey async with optional exclude predicate
-  - Priority: High | Scope: S (1-2 files) | Deps: None
-- [ ] **Task 4**: Wire isKeyOverLimit into retry handler
-  - Priority: High | Scope: S (1 file) | Deps: Task 3
-- [ ] **Task 5**: Connect config and tracker in server, handle 429
-  - Priority: High | Scope: S (2 files) | Deps: Task 4
-- [ ] **Task 6**: Token enforcement integration test
-  - Priority: Medium | Scope: S (1 file) | Deps: Task 5
+## Checkpoint: Phases 1-2 — DONE
+- [x] tsc + build clean
+- [x] test-comprehensive.mjs 46/46 pass (before test extension)
+- [x] Manual curl checks of both new endpoints + x-request-id + abort
+- [x] Reviewed with human
 
-### Checkpoint: Phase 2
-- [ ] Build succeeds
-- [ ] Normal request → 200
-- [ ] All keys over limit → 429
+## Phase 3: Verification & deliverables — DONE
 
-## Phase 3: Dynamic Model List
+- [x] **Task 5: Extended test suite** — sections 12-17 added
+  - Full green run: 67/67 pass (maximax-m3 only, per user requirement — it's the model with vision support)
+- [x] **Task 6: Agent integration docs + examples**
+  - README: Express diagram, agent-compat matrix, endpoint docs; `.env.example` created; `examples/opencode.example.json` (valid JSON); `examples/hermes-config.yaml`
 
-- [ ] **Task 7**: Fetch models from Ollama cloud API with caching
-  - Priority: Medium | Scope: M (2 files) | Deps: None
-
-### Checkpoint: Phase 3
-- [ ] Build succeeds
-- [ ] `/v1/models` returns live models from Ollama API
-
-## Final Checkpoint
-- [ ] Build succeeds
-- [ ] All tests pass
-- [ ] Server starts and responds correctly
+## Checkpoint: Complete
+- [x] Full test suite green run — 67/67 (with `MAX_KEY_RETRIES=10` after server restart)
+- [ ] Manual smoke: opencode/hermes pointed at proxy (user-side verification)

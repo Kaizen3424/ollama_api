@@ -113,6 +113,21 @@ check('401 has error type auth_error', badBody.error.type === 'auth_error')
 const m2 = await api('GET', '/v1/models', null, 'sk-bad-key')
 check('Models public with bad key', m2.status === 200)
 
+// Strict SSE consumer: every data: line MUST parse as JSON (except [DONE]).
+// Catches corrupted streams (e.g. truncated events, mangled continuations).
+function parseSseStrict(text) {
+  const events = []
+  let done = false
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('data:')) continue
+    const jsonStr = line.slice(5).trim()
+    if (jsonStr === '[DONE]') { done = true; continue }
+    if (jsonStr === '') continue
+    events.push(JSON.parse(jsonStr))
+  }
+  return { events, done }
+}
+
 // ─── 7. Streaming ──────────────────────────────
 console.log('\n=== 7. Streaming ===')
 const stream = await api('POST', '/v1/chat/completions', {
@@ -122,10 +137,10 @@ const stream = await api('POST', '/v1/chat/completions', {
 }, KEY1)
 check('Streaming returns 200', stream.status === 200)
 check('Content-Type is event-stream', stream.headers['content-type']?.startsWith('text/event-stream'))
-const hasDone = stream.body.includes('[DONE]')
-check('Stream contains [DONE]', hasDone)
-const hasStreamUsage = stream.body.includes('"usage"')
-check('Stream contains usage data', hasStreamUsage)
+const strictStream = parseSseStrict(stream.body)
+check('Every data: line parses as strict JSON', strictStream.events.length > 0)
+check('Stream contains [DONE]', strictStream.done)
+check('Stream contains usage data', strictStream.events.some(e => !!e.usage))
 
 // ─── 8. Vision ─────────────────────────────────
 console.log('\n=== 8. Vision ===')
@@ -177,6 +192,88 @@ const err429 = JSON.parse('{"error":{"message":"All API keys have exceeded their
 check('429 error has type rate_limit_error', err429.error.type === 'rate_limit_error')
 check('429 error has code 429', err429.error.code === '429')
 check('429 has error.message', typeof err429.error.message === 'string')
+
+// ─── 12. Tool calling (non-streaming) ─────────
+console.log('\n=== 12. Tool calling (non-streaming) ===')
+const tools = [{ type: 'function', function: { name: 'get_time', description: 'Get the current time', parameters: { type: 'object', properties: {} } } }]
+const tc1 = await api('POST', '/v1/chat/completions', {
+  model: 'minimax-m3',
+  messages: [{ role: 'user', content: 'What time is it? Use the get_time tool.' }],
+  tools, temperature: 0,
+}, KEY1)
+check('Tool call returns 200', tc1.status === 200)
+const t1d = JSON.parse(tc1.body)
+const toolMsg = t1d.choices?.[0]?.message
+check('Has tool_calls array', Array.isArray(toolMsg?.tool_calls) && toolMsg.tool_calls.length > 0)
+check('Finish reason is tool_calls', t1d.choices?.[0]?.finish_reason === 'tool_calls')
+if (toolMsg?.tool_calls?.length) {
+  const tc = toolMsg.tool_calls[0]
+  check('Tool call has id', typeof tc.id === 'string' && tc.id.length > 0)
+  check('Tool call has function name', tc.function?.name === 'get_time')
+  check('Tool call has arguments (string)', typeof tc.function?.arguments === 'string')
+}
+
+// ─── 13. Tool calling (streaming) ─────────────
+console.log('\n=== 13. Tool calling (streaming) ===')
+const tc2 = await api('POST', '/v1/chat/completions', {
+  model: 'minimax-m3',
+  messages: [{ role: 'user', content: 'What time is it? Use the get_time tool.' }],
+  tools, stream: true, temperature: 0,
+}, KEY1)
+check('Streaming tool call returns 200', tc2.status === 200)
+const strictTc2 = parseSseStrict(tc2.body)
+check('Every data: line parses as strict JSON', strictTc2.events.length > 0)
+check('Stream has delta.tool_calls', strictTc2.events.some(e => e.choices?.[0]?.delta?.tool_calls))
+check('Stream has [DONE]', strictTc2.done)
+
+// ─── 14. Reasoning passthrough ────────────────
+console.log('\n=== 14. Reasoning passthrough ===')
+const reason = await api('POST', '/v1/chat/completions', {
+  model: 'minimax-m3',
+  messages: [{ role: 'user', content: 'Say OK' }],
+  temperature: 0,
+}, KEY1)
+check('Reasoning returns 200', reason.status === 200)
+const rField = JSON.parse(reason.body).choices?.[0]?.message?.reasoning
+check('Reasoning field present', typeof rField === 'string')
+check('Reasoning is non-empty', typeof rField === 'string' && rField.length > 0)
+
+// ─── 15. JSON mode ────────────────────────────
+console.log('\n=== 15. JSON mode ===')
+const jm = await api('POST', '/v1/chat/completions', {
+  model: 'minimax-m3',
+  messages: [{ role: 'user', content: 'Return only JSON: {"ok": true}' }],
+  response_format: { type: 'json_object' }, temperature: 0,
+}, KEY1)
+check('JSON mode returns 200', jm.status === 200)
+const jd = JSON.parse(jm.body)
+const jContent = jd.choices?.[0]?.message?.content ?? ''
+check('Content is parseable JSON', (() => { try { JSON.parse(jContent); return true } catch { return false } })())
+
+// ─── 16. x-request-id header ──────────────────
+console.log('\n=== 16. x-request-id header ===')
+const rid = tc1.headers['x-request-id']
+check('x-request-id present and non-empty', typeof rid === 'string' && rid.length > 0)
+
+// ─── 17. /v1/completions + /v1/embeddings ────
+console.log('\n=== 17. /v1/completions + /v1/embeddings ===')
+const comp = await api('POST', '/v1/completions', {
+  model: 'minimax-m3', prompt: 'Say OK', max_tokens: 5, temperature: 0,
+}, KEY1)
+check('Completions returns 400 (chat model unsupported)', comp.status === 400)
+const cpd = JSON.parse(comp.body)
+check('Completions error type invalid_request_error', cpd.error?.type === 'invalid_request_error')
+
+const compNoAuth = await api('POST', '/v1/completions', { model: 'minimax-m3', prompt: 'Say OK' })
+check('Completions without key returns 401', compNoAuth.status === 401)
+
+const emb = await api('POST', '/v1/embeddings', { model: 'minimax-m3', input: 'Hello world' }, KEY1)
+check('Embeddings returns 404 (upstream unsupported)', emb.status === 404)
+const ebd = JSON.parse(emb.body)
+check('Embeddings error is OpenAI-shaped', !!ebd.error && typeof ebd.error.message === 'string')
+
+const embNoAuth = await api('POST', '/v1/embeddings', { model: 'minimax-m3', input: 'Hello' })
+check('Embeddings without key returns 401', embNoAuth.status === 401)
 
 // ─── Summary ──────────────────────────────────
 console.log(`\n\x1b[36m═══════════════════════════════════════\x1b[0m`)
