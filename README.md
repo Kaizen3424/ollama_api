@@ -79,11 +79,15 @@ npm run dev     # Build + start in one step
 
 ## API
 
-All endpoints are OpenAI-format compatible.
+All endpoints are OpenAI-format compatible, plus the Anthropic `/v1/messages` endpoint.
+
+### `GET /`
+
+Server status. Public. Shows service name/version, uptime, upstream, key pool sizes, usage-tracking state, and the endpoint list.
 
 ### `GET /health`
 
-Health check. Public.
+Health check. Public. Returns `{ "status": "ok" }`.
 
 ### `GET /v1/models`
 

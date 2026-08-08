@@ -1,11 +1,11 @@
 # Ollama API Proxy
 
-A lightweight OpenAI-compatible proxy for Ollama's cloud API with load balancing, rate limiting, token usage tracking, and multi-key authentication.
+A lightweight OpenAI- and Anthropic-compatible proxy for Ollama's cloud API with load balancing, rate limiting, token usage tracking, and multi-key authentication.
 
 ## Stack
 
 - **Runtime:** Node.js 24 + TypeScript
-- **Framework:** Fastify v5
+- **Framework:** Express v4
 - **Database:** MongoDB (usage tracking)
 - **HTTP client:** undici
 
@@ -24,7 +24,7 @@ All secrets are configured in Replit's Secrets manager:
 | `PORT` | Server port (default 3001) |
 | `HOST` | Bind address (default 0.0.0.0) |
 | `UPSTREAM_BASE` | Ollama API base URL |
-| `PROXY_API_KEY1` | Client auth key #1 |
+| `PROXY_API_KEY1` | Client auth key #1 (Bearer or `x-api-key`) |
 | `PROXY_API_KEY2` | Client auth key #2 |
 | `KEY_COOLDOWN_MS` | Cooldown for failed keys (ms) |
 | `MAX_KEY_RETRIES` | Max retries per request |
@@ -44,9 +44,13 @@ Place keys in `ollama_keys.txt` at the project root, one per line. Supports numb
 
 ## API Endpoints
 
+- `GET /` — server status (public)
 - `GET /health` — health check (public)
 - `GET /v1/models` — list models from Ollama (public)
-- `POST /v1/chat/completions` — chat completion, requires `Authorization: Bearer <PROXY_API_KEY>` header
+- `POST /v1/chat/completions` — OpenAI chat completion, requires proxy API key (Bearer or `x-api-key`)
+- `POST /v1/completions` — OpenAI text completion passthrough (same auth)
+- `POST /v1/embeddings` — OpenAI embeddings passthrough (same auth)
+- `POST /v1/messages` — Anthropic Messages API passthrough (`x-api-key` or Bearer auth; streaming, tools, vision supported)
 - `GET /v1/usage` — token usage breakdown (public)
 
 ## Deployment

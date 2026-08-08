@@ -1,6 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import pino from 'pino'
+import { createRequire } from 'node:module'
 import type { AppConfig } from './types/config.js'
 import { createLoadBalancer } from './load-balancer.js'
 import { createForwarder } from './proxy/forwarder.js'
@@ -13,6 +14,20 @@ import { registerModels } from './routes/models.js'
 import { registerUsage } from './routes/usage.js'
 import { registerAnthropicMessages } from './routes/anthropic-messages.js'
 import type { ApiError } from './types/openai.js'
+
+const require = createRequire(import.meta.url)
+const pkg = require('../package.json') as { name: string; version: string }
+
+const ENDPOINTS = [
+  { method: 'GET', path: '/' },
+  { method: 'GET', path: '/health' },
+  { method: 'GET', path: '/v1/models' },
+  { method: 'POST', path: '/v1/chat/completions' },
+  { method: 'POST', path: '/v1/completions' },
+  { method: 'POST', path: '/v1/embeddings' },
+  { method: 'POST', path: '/v1/messages' },
+  { method: 'GET', path: '/v1/usage' },
+]
 
 function requestLogger(logger: pino.Logger) {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -64,7 +79,7 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
   if (config.proxyApiKeys.length > 0) {
     app.use((req, res, next) => {
       const url = req.url
-      if (url === '/health' || url.startsWith('/v1/models') || url.startsWith('/v1/usage')) {
+      if (url === '/' || url === '/health' || url.startsWith('/v1/models') || url.startsWith('/v1/usage')) {
         return next()
       }
       const anthropic = url.startsWith('/v1/messages')
@@ -137,6 +152,25 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' })
+  })
+
+  app.get('/', (_req, res) => {
+    res.json({
+      status: 'ok',
+      service: pkg.name,
+      version: pkg.version,
+      uptime_seconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+      upstream: config.upstreamBase,
+      auth: {
+        proxy_keys: config.proxyApiKeys.length,
+      },
+      keys: {
+        ollama_keys: lb.getKeyCount(),
+      },
+      usage_tracking: !!tracker,
+      endpoints: ENDPOINTS,
+    })
   })
 
   app.use((err: Error & { statusCode?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
