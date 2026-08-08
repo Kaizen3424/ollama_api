@@ -1,13 +1,17 @@
 import type { Express, Request, Response } from 'express'
 import type { RetryHandler } from '../retry-handler.js'
 import type { UsageTracker } from '../usage-tracker.js'
-import { pipeStream } from '../proxy/stream-handler.js'
+import { pipeStream, type StreamUsage } from '../proxy/stream-handler.js'
 import { normalizeUpstreamError } from '../proxy/error-normalizer.js'
 
 export interface PassthroughRouteOptions {
   path: string
   upstreamPath?: string
   streamable?: boolean
+  extractUsage?: (json: unknown) => StreamUsage | undefined
+  extractStreamUsage?: (eventJson: unknown) => StreamUsage | undefined
+  renderError?: (statusCode: number, rawBody: string) => unknown
+  errorEventStyle?: 'openai' | 'anthropic'
 }
 
 export function registerPassthroughRoute(
@@ -16,7 +20,14 @@ export function registerPassthroughRoute(
   tracker: UsageTracker | undefined,
   options: PassthroughRouteOptions,
 ) {
-  const { path, streamable = false } = options
+  const {
+    path,
+    streamable = false,
+    extractUsage,
+    extractStreamUsage,
+    renderError,
+    errorEventStyle = 'openai',
+  } = options
   const upstreamPath = options.upstreamPath ?? path
 
   app.post(path, async (req: Request, res: Response) => {
@@ -54,17 +65,22 @@ export function registerPassthroughRoute(
         }
 
         if (upstreamStatus >= 400) {
-          return res.status(upstreamStatus).json(normalizeUpstreamError(upstreamStatus, data))
+          return res
+            .status(upstreamStatus)
+            .json(renderError ? renderError(upstreamStatus, data) : normalizeUpstreamError(upstreamStatus, data))
         }
 
         try {
           const parsed = JSON.parse(data)
-          if (parsed.usage) {
-            await trackUsage(parsed.usage.prompt_tokens ?? 0, parsed.usage.completion_tokens ?? 0)
+          const usage = extractUsage ? extractUsage(parsed) : parsed.usage
+          if (usage) {
+            await trackUsage(usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0)
           }
           return res.status(200).json(parsed)
         } catch {
-          return res.status(502).json(normalizeUpstreamError(502, data))
+          return res.status(502).json(
+            renderError ? renderError(502, data) : normalizeUpstreamError(502, data),
+          )
         }
       }
 
@@ -73,11 +89,15 @@ export function registerPassthroughRoute(
         for await (const chunk of result.body as NodeJS.ReadableStream) {
           data += typeof chunk === 'string' ? chunk : chunk.toString()
         }
-        return res.status(upstreamStatus).json(normalizeUpstreamError(upstreamStatus, data))
+        return res
+          .status(upstreamStatus)
+          .json(renderError ? renderError(upstreamStatus, data) : normalizeUpstreamError(upstreamStatus, data))
       }
 
       await pipeStream(result.body as NodeJS.ReadableStream, res, {
         signal: controller.signal,
+        usageExtractor: extractStreamUsage,
+        errorEventStyle,
         onUsage: async (usage) => {
           await trackUsage(usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0)
         },
@@ -90,6 +110,13 @@ export function registerPassthroughRoute(
       const type = statusCode === 429 ? 'rate_limit_error' : 'proxy_error'
       const code = statusCode === 429 ? '429' : 'upstream_unavailable'
       res.locals._errMessage = message
+      if (renderError) {
+        const body = renderError(
+          statusCode,
+          JSON.stringify({ error: { message, type: statusCode === 429 ? 'rate_limit_error' : 'api_error' } }),
+        )
+        return res.status(statusCode).json(body)
+      }
       return res.status(statusCode).json({
         error: { message, type, code },
       })

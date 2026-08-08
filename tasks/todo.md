@@ -1,32 +1,34 @@
-# Task List: Agent Compatibility Hardening
+# Task List: Anthropic Compatible Proxy
 
-## Phase 1: Connection hardening — DONE
+## Phase 1: Foundation — DONE
 
-- [x] **Task 1: Client-disconnect abort** (forwarder, retry-handler, chat route, stream-handler)
-  - Abort verified: "Client disconnected, aborting upstream request" logged on client cancel
-- [x] **Task 2: Server timeouts + x-request-id**
-  - keepAlive 120s / headers 125s / requestTimeout disabled; x-request-id forwarded (verified in logs + tests)
+- [x] **Task 1: Auth middleware — `x-api-key` + per-route error shape** (`src/server.ts`)
+  - `x-api-key` accepted alongside `Authorization: Bearer`; 401s on `/v1/messages` are Anthropic-shaped (`type:error`/`authentication_error`), OpenAI routes unchanged
+- [x] **Task 2: Stream + error normalizer Anthropic hooks**
+  - `pipeStream` gained `usageExtractor` + `errorEventStyle: 'anthropic'` (mid-stream error emits `event: error`, no `[DONE]`); `formatAnthropicError` in error-normalizer
 
-## Phase 2: New endpoints — DONE
-
-- [x] **Task 3: Generic passthrough route factory** (`src/routes/passthrough.ts`)
-  - Fixed `/v1/v1/` double-prefix bug via `upstreamPath` option
-- [x] **Task 4: /v1/completions + /v1/embeddings**
-  - completions: 400 invalid_request_error forwarded verbatim; embeddings: normalized 404; both 401 without key
-
-## Checkpoint: Phases 1-2 — DONE
+## Checkpoint: Foundation — DONE
 - [x] tsc + build clean
-- [x] test-comprehensive.mjs 46/46 pass (before test extension)
-- [x] Manual curl checks of both new endpoints + x-request-id + abort
-- [x] Reviewed with human
+- [x] Existing `test-comprehensive.mjs` green (69/69)
 
-## Phase 3: Verification & deliverables — DONE
+## Phase 2: Anthropic endpoint — DONE
 
-- [x] **Task 5: Extended test suite** — sections 12-17 added
-  - Full green run: 67/67 pass (maximax-m3 only, per user requirement — it's the model with vision support)
-- [x] **Task 6: Agent integration docs + examples**
-  - README: Express diagram, agent-compat matrix, endpoint docs; `.env.example` created; `examples/opencode.example.json` (valid JSON); `examples/hermes-config.yaml`
+- [x] **Task 3: `/v1/messages` route via generic passthrough**
+  - `src/routes/anthropic-messages.ts` registers `/v1/messages` → upstream `/messages`; usage extracted from `message.usage` / `message_delta.usage` and tracked; upstream errors Anthropic-shaped; `x-request-id` forwarded
+  - Upstream auth verified: `Authorization: Bearer` (ollama cloud) works alone — no x-api-key needed
+- [x] **Task 4: test-anthropic.mjs live suite** — 45/45
+  - non-streaming, system+Bearer, streaming event sequence, tool_use + tool_result round-trip, auth 401s (Anthropic + OpenAI shapes), upstream 404 passthrough, x-request-id, vision
+  - Note: vision test needs `max_tokens >= 128` — thinking blocks consume the budget before text
+
+## Checkpoint: Core complete — DONE
+- [x] 45/45 anthropic + 69/69 comprehensive + build clean
+
+## Phase 3: Polish — DONE
+
+- [x] **Task 5: README Anthropic section, `.env.example`, `examples/claude-code.md`**
+  - README: feature bullet, `/v1/messages` API docs, Claude Code agent section, matrix rows, testing section
+  - `.env.example` created (was missing); `examples/claude-code.md` with setup, model naming, upstream limitations
 
 ## Checkpoint: Complete
-- [x] Full test suite green run — 67/67 (with `MAX_KEY_RETRIES=10` after server restart)
-- [ ] Manual smoke: opencode/hermes pointed at proxy (user-side verification)
+- [x] All acceptance criteria met; build clean; 114/114 checks across both suites
+- [ ] Manual user-side smoke with an Anthropic client (Claude Code / Cline)

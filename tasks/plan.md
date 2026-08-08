@@ -1,54 +1,59 @@
-# Implementation Plan: Agent Compatibility Hardening (opencode + Hermes)
+# Implementation Plan: Anthropic Compatible Proxy
 
 ## Overview
 
-The Express proxy already delivers fully OpenAI-compliant chat completions — verified via live probes on 2026-07-31: streaming `delta.tool_calls` in exact AI-SDK format, non-streaming `tool_calls`, `reasoning` content, vision, usage chunk + `data: [DONE]`, and OpenAI-shaped errors. opencode (`@ai-sdk/openai-compatible`) and Hermes (custom endpoint) can already talk to it. This plan hardens the remaining gaps: client-disconnect abort (stops wasted Ollama tokens), server timeouts tuned for long agent sessions, `x-request-id` tracing, new passthrough endpoints (`/v1/completions`, `/v1/embeddings`), a test suite locking in tool-call/reasoning behavior, and agent integration docs + examples.
+Expose `POST /v1/messages` on the existing Express proxy (`:3001`) so Anthropic-protocol clients (Claude Code, Cline Anthropic mode, etc.) can use the Ollama cloud key pool with all existing benefits: proxy API-key auth, load balancing, retry/key rotation, token-limit enforcement, usage tracking, and streaming. The upstream `ollama.com/v1/messages` (verified live: Anthropic-shaped 401 with `authentication_error` on unauthenticated probe) is passed through byte-faithfully — no message format conversion is written.
 
 ## Architecture Decisions
 
-- **Passthrough remains the strategy** — upstream Ollama Cloud is AI-SDK compliant; the proxy adds no response rewriting. New endpoints are transparent forwarders.
-- **Generic route factory** for the new POST endpoints (reuses retry handler, error normalizer, usage tracking, auth).
-- **Abort plumbing**: one `AbortSignal` derived from the Express response (`res.on('close')`) → per-attempt `AbortSignal` in the retry handler → undici `request({ signal })`. Retries stop once the client is gone.
-- **No `/v1/responses` translation layer** (deferred — chat completions covers both agents).
-- **No fabricated context lengths** in `/v1/models` — Hermes' `context_length` override is documented in the example config instead.
+- **Pure passthrough, not conversion** — upstream already implements full Anthropic compat (messages, streaming, tools, vision, thinking; docs list `tool_choice`/`count_tokens`/metadata as upstream-unsupported, so we don't emulate them).
+- **Reuse `registerPassthroughRoute` + `pipeStream`** — extend both with optional Anthropic hooks instead of forking new stream logic:
+  - `extractUsage` / `extractStreamUsage` (Anthropic nests usage at `message.usage.input_tokens` and `message_delta.usage.output_tokens`, not top-level `usage`)
+  - `renderError` (Anthropic error shape `{"type":"error","error":{"type","message"}}` instead of OpenAI's)
+  - `errorEventStyle: 'anthropic'` (mid-stream failure emits `event: error` + anthropic body, **no** `[DONE]`)
+- **Auth**: `x-api-key` header maps to the same `PROXY_API_KEY*` pool (both `x-api-key` and `Authorization: Bearer` accepted); 401 payloads are Anthropic-shaped on `/v1/messages`, OpenAI-shaped elsewhere.
+- **Forwarded headers**: existing forwarder sends `Authorization: Bearer <ollama key>` as-is; `anthropic-version` client header is dropped (docs: accepted but not used). Upstream `x-request-id` forwarded as today.
+- **No Task 5 (model alias rewriting)** — out of scope per user decision.
 
 ## Task List
 
-### Phase 1: Connection hardening (foundation)
+### Phase 1: Foundation
 
-- [ ] Task 1: Client-disconnect abort (forwarder, retry-handler, chat route, stream-handler)
-- [ ] Task 2: Server timeouts + x-request-id forwarding
+- [ ] Task 1: Auth middleware — `x-api-key` + per-route error shape (`src/server.ts`)
+- [ ] Task 2: Stream + error normalizer Anthropic hooks (`src/proxy/stream-handler.ts`, `src/proxy/error-normalizer.ts`)
 
-### Phase 2: New endpoints
-
-- [ ] Task 3: Generic passthrough route factory + refactor chat route
-- [ ] Task 4: /v1/completions + /v1/embeddings routes
-
-### Checkpoint: Phases 1-2
+### Checkpoint: Foundation
 - [ ] `tsc --noEmit` + `npm run build` clean
-- [ ] `node test-comprehensive.mjs` all pass
-- [ ] Manual curl checks of both new endpoints pass
+- [ ] Existing routes still pass `node test-comprehensive.mjs`
 - [ ] Review with human before proceeding
 
-### Phase 3: Verification & deliverables
+### Phase 2: Anthropic endpoint
 
-- [ ] Task 5: Extended test suite (tools, reasoning, JSON mode, x-request-id, new endpoints)
-- [ ] Task 6: README agent-compat section, .env.example, example configs
+- [ ] Task 3: `/v1/messages` route via generic passthrough (`src/routes/passthrough.ts` options, new `src/routes/anthropic-messages.ts`, `src/server.ts` wiring)
+- [ ] Task 4: Live test suite (`test-anthropic.mjs`)
+
+### Checkpoint: Core complete
+- [ ] All tests green; manual `@anthropic-ai/sdk` smoke test
+- [ ] Review with human before proceeding
+
+### Phase 3: Polish
+
+- [ ] Task 5: README Anthropic section, `.env.example`, `examples/claude-code.*`
 
 ### Checkpoint: Complete
 - [ ] All acceptance criteria met, all tests pass
-- [ ] Manual smoke: opencode/hermes pointed at proxy (user-side verification)
+- [ ] Manual smoke: Anthropic client pointed at proxy (user-side verification)
 - [ ] Ready for review
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Upstream Ollama Cloud changes API shape | Compatibility breaks silently | Tests pin the observed behavior; error normalizer already wraps upstream failures |
-| Abort wiring kills valid requests | Broken streaming | Abort only fires on client close before completion; abort-listener cleanup; full regression suite |
-| Disabling `requestTimeout` | Slowloris exposure | Body must still arrive before response phase; proxy is LAN/trusted-key use; documented tradeoff |
-| `/v1/embeddings` unsupported upstream | Endpoint 404s | Passthrough returns normalized OpenAI-shaped error; docs note upstream support is pending |
+| Upstream `/v1/messages` may require `x-api-key` header instead of Bearer | 401 on all forwarded requests | Verify once with live key in Task 3; add header alongside Bearer if needed |
+| Upstream stream usage shape could drift | usage tracking gaps | Same failure mode as today's OpenAI path; extractor is tolerant (undefined → skip) |
+| Claude Code defaults to `claude-*` model names | upstream 404 | README documents using a real cloud model id (`minimax-m3`, `glm-4.7:cloud`, ...) |
+| Anthropic streams end with `message_stop`, not `[DONE]` | client-dependent parsing | Pass-through verbatim; SDKs expect exactly this |
 
 ## Open Questions
 
-- None blocking. Implementation order: Task 1 -> 2 -> 3 -> 4 -> checkpoint -> 5 -> 6.
+- None blocking. Implementation order: 1 -> 2 -> checkpoint -> 3 -> 4 -> checkpoint -> 5.

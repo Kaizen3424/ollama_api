@@ -11,6 +11,71 @@ const STATUS_TEXT: Record<number, string> = {
   503: 'service_unavailable',
 }
 
+const ANTHROPIC_STATUS_TYPE: Record<number, string> = {
+  400: 'invalid_request_error',
+  401: 'authentication_error',
+  403: 'permission_error',
+  404: 'not_found_error',
+  429: 'rate_limit_error',
+}
+
+export interface AnthropicApiError {
+  type: 'error'
+  error: {
+    type: string
+    message: string
+  }
+}
+
+export function formatAnthropicError(statusCode: number, rawBody: string): AnthropicApiError {
+  try {
+    const parsed = JSON.parse(rawBody)
+    if (parsed?.type === 'error' && parsed?.error && typeof parsed.error.message === 'string') {
+      return {
+        type: 'error',
+        error: {
+          type: String(parsed.error.type ?? ANTHROPIC_STATUS_TYPE[statusCode] ?? 'api_error'),
+          message: parsed.error.message,
+        },
+      }
+    }
+    if (
+      parsed?.error &&
+      typeof parsed.error === 'object' &&
+      typeof parsed.error.message === 'string'
+    ) {
+      return {
+        type: 'error',
+        error: {
+          type: String(parsed.error.type ?? ANTHROPIC_STATUS_TYPE[statusCode] ?? 'api_error'),
+          message: parsed.error.message,
+        },
+      }
+    }
+    if (typeof parsed?.error === 'string' || typeof parsed?.message === 'string') {
+      return {
+        type: 'error',
+        error: {
+          type: ANTHROPIC_STATUS_TYPE[statusCode] ?? 'api_error',
+          message: typeof parsed?.error === 'string' ? parsed.error : parsed.message,
+        },
+      }
+    }
+  } catch {
+    // invalid JSON — fall through to generic
+  }
+
+  return {
+    type: 'error',
+    error: {
+      type: ANTHROPIC_STATUS_TYPE[statusCode] ?? 'api_error',
+      message: rawBody
+        ? `Upstream error: ${rawBody.slice(0, 500)}`
+        : `Upstream returned ${statusCode}`,
+    },
+  }
+}
+
 export function normalizeUpstreamError(statusCode: number, rawBody: string): ApiError {
   const type = STATUS_TEXT[statusCode] ?? 'upstream_error'
   const code = String(statusCode)

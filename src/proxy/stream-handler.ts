@@ -31,6 +31,8 @@ export function createSseLineSplitter(): SseLineSplitter {
 export interface PipeStreamOptions {
   signal?: AbortSignal
   onUsage?: (usage: StreamUsage) => void | Promise<void>
+  usageExtractor?: (eventJson: unknown) => StreamUsage | undefined
+  errorEventStyle?: 'openai' | 'anthropic'
 }
 
 export async function pipeStream(
@@ -38,7 +40,7 @@ export async function pipeStream(
   res: ServerResponse,
   options: PipeStreamOptions = {},
 ): Promise<void> {
-  const { signal, onUsage } = options
+  const { signal, onUsage, usageExtractor, errorEventStyle = 'openai' } = options
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -57,6 +59,15 @@ export async function pipeStream(
   }
 
   const emitErrorEvent = (message: string) => {
+    if (errorEventStyle === 'anthropic') {
+      const payload = JSON.stringify({
+        type: 'error',
+        error: { type: 'api_error', message },
+      })
+      res.write('event: error\n')
+      res.write(`data: ${payload}\n\n`)
+      return
+    }
     const payload = JSON.stringify({
       error: { message, type: 'proxy_error', code: '502' },
     })
@@ -77,8 +88,9 @@ export async function pipeStream(
           if (jsonStr && jsonStr !== '[DONE]') {
             try {
               const parsed = JSON.parse(jsonStr)
-              if (parsed?.usage) {
-                await onUsage(parsed.usage)
+              const usage = usageExtractor ? usageExtractor(parsed) : parsed?.usage
+              if (usage) {
+                await onUsage(usage)
               }
             } catch { /* not JSON — skip */ }
           }

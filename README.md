@@ -1,10 +1,11 @@
 # Ollama API Proxy
 
-A lightweight OpenAI-compatible proxy for Ollama's cloud API with load balancing, rate limiting, token usage tracking, and multi-key authentication. Fully compatible with agentic clients such as [opencode](https://opencode.ai) and [Hermes Agent](https://hermes-agent.nousresearch.com).
+A lightweight OpenAI- and Anthropic-compatible proxy for Ollama's cloud API with load balancing, rate limiting, token usage tracking, and multi-key authentication. Fully compatible with agentic clients such as [opencode](https://opencode.ai), [Hermes Agent](https://hermes-agent.nousresearch.com), and [Claude Code](https://code.claude.com).
 
 ## Features
 
 - **OpenAI-compatible** — drop-in replacement for `api.openai.com` (chat completions, completions, embeddings passthrough)
+- **Anthropic-compatible** — `POST /v1/messages` drop-in for the Anthropic Messages API (streaming, tools, vision, thinking passthrough)
 - **Agent-ready streaming** — byte-faithful SSE passthrough: strict line buffering guarantees complete events (never truncated mid-JSON, regardless of upstream chunk boundaries), with OpenAI error events on mid-stream failures
 - **Tool calling** — streamed `delta.tool_calls` and non-streaming `tool_calls` pass through unchanged
 - **Load balancing** — round-robins across 48+ Ollama API keys
@@ -105,6 +106,26 @@ Supports:
 
 Text completion passthrough (same auth as chat completions). Note: current Ollama cloud models return `400 invalid_request_error` for this endpoint — the error is forwarded as-is.
 
+### `POST /v1/messages`
+
+Anthropic Messages API passthrough. Drop-in for `api.anthropic.com/v1/messages` — body and streaming events (`message_start`, `content_block_start/delta/stop`, `message_delta`, `message_stop`) pass through byte-faithfully with no conversion. Requires a proxy API key via `x-api-key: <key>` (Anthropic clients) or `Authorization: Bearer <key>`.
+
+Supports (upstream): streaming, system prompts, multi-turn, tool calling with `tool_use`/`tool_result` blocks, base64 vision images, extended thinking.
+
+Not supported (upstream limitations, forwarded as errors): `count_tokens`, `tool_choice`, `metadata`, prompt caching, PDF documents, batches, citations.
+
+Usage (input/output tokens) is extracted from `message.usage` / `message_delta.usage` and tracked like OpenAI usage. Upstream errors are returned in Anthropic shape (`{"type":"error","error":{...}}`); auth failures return `authentication_error` with HTTP 401.
+
+Client setup (e.g. Claude Code):
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:3001
+export ANTHROPIC_AUTH_TOKEN=<proxy-key>    # required but treated as the x-api-key
+claude --model minimax-m3                  # use a real Ollama cloud model id
+```
+
+See `examples/claude-code.md` for details, including model naming and upstream limitations.
+
 ### `POST /v1/embeddings`
 
 Embeddings passthrough (same auth). Note: currently not implemented upstream (`404`), returned in OpenAI error shape.
@@ -126,7 +147,11 @@ Response:
 
 ## Agent compatibility
 
-The proxy is verified to work with agentic clients that speak the OpenAI API:
+The proxy is verified to work with agentic clients that speak the OpenAI or Anthropic API:
+
+### Claude Code (Anthropic)
+
+Point Claude Code at the proxy with `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` and an explicit model id — see `examples/claude-code.md`. Verified: non-streaming, SSE streaming, tool calling, multi-turn with tool results, vision, auth via `x-api-key`.
 
 ### opencode
 
@@ -172,11 +197,17 @@ Important: Hermes requires **at least 64,000 tokens of context** for agent use w
 | Client disconnect | Upstream request aborted (logged) |
 | `/v1/completions` | Passthrough (upstream rejects chat models with 400) |
 | `/v1/embeddings` | Passthrough (not implemented upstream yet, 404) |
+| `/v1/messages` (Anthropic, non-streaming) | Verified — `msg_*` id, content blocks, `stop_reason`, usage |
+| `/v1/messages` (SSE streaming) | Verified — full event sequence, usage in `message_start`/`message_delta`, no `[DONE]` |
+| `/v1/messages` tool calling | Verified — `tool_use` blocks + `tool_result` round-trip |
+| `/v1/messages` vision | Verified — base64 `image` blocks |
+| `/v1/messages` auth (`x-api-key`) | Verified — Anthropic-shaped 401, same key pool as Bearer |
 
 ## Testing
 
 ```bash
-node test-comprehensive.mjs
+node test-comprehensive.mjs   # OpenAI-format suite
+node test-anthropic.mjs       # Anthropic /v1/messages suite
 ```
 
 Requires the server to be running with the default `.env` keys. Note: the suite makes live calls against Ollama cloud — if your key pool is currently exhausting its weekly usage limits, some checks may transiently fail with 429.

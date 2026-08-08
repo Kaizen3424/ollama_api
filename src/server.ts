@@ -11,6 +11,7 @@ import { registerCompletions } from './routes/completions.js'
 import { registerEmbeddings } from './routes/embeddings.js'
 import { registerModels } from './routes/models.js'
 import { registerUsage } from './routes/usage.js'
+import { registerAnthropicMessages } from './routes/anthropic-messages.js'
 import type { ApiError } from './types/openai.js'
 
 function requestLogger(logger: pino.Logger) {
@@ -66,20 +67,40 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
       if (url === '/health' || url.startsWith('/v1/models') || url.startsWith('/v1/usage')) {
         return next()
       }
+      const anthropic = url.startsWith('/v1/messages')
       const auth = req.headers.authorization
-      if (!auth || !auth.startsWith('Bearer ')) {
+      const xKey = req.headers['x-api-key']
+      const token = auth?.startsWith('Bearer ')
+        ? auth.slice(7)
+        : Array.isArray(xKey)
+          ? xKey[0]
+          : xKey
+      if (!token) {
         res.locals._errMessage = 'Invalid or missing API key'
-        return res.status(401).json({
-          error: { message: 'Invalid or missing API key', type: 'auth_error', code: '401' },
-        })
+        return res.status(401).json(
+          anthropic
+            ? {
+                type: 'error',
+                error: { type: 'authentication_error', message: 'Invalid or missing API key' },
+              }
+            : {
+                error: { message: 'Invalid or missing API key', type: 'auth_error', code: '401' },
+              },
+        )
       }
-      const token = auth.slice(7)
       const idx = config.proxyApiKeys.indexOf(token)
       if (idx === -1) {
         res.locals._errMessage = 'Invalid or missing API key'
-        return res.status(401).json({
-          error: { message: 'Invalid or missing API key', type: 'auth_error', code: '401' },
-        })
+        return res.status(401).json(
+          anthropic
+            ? {
+                type: 'error',
+                error: { type: 'authentication_error', message: 'Invalid or missing API key' },
+              }
+            : {
+                error: { message: 'Invalid or missing API key', type: 'auth_error', code: '401' },
+              },
+        )
       }
       ;(req as any).proxyKeyIndex = idx
       next()
@@ -112,6 +133,7 @@ export async function buildServer(config: AppConfig, prettyLogs = false) {
   registerEmbeddings(app, retry, tracker)
   registerModels(app, forwarder, lb, logger)
   registerUsage(app, tracker)
+  registerAnthropicMessages(app, retry, tracker)
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' })
